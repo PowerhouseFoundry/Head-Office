@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Nando's Guest Experience Desk</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css" />
+
+  <style>
+    .suite-page-tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .suite-page-tools a,.suite-page-tools button{border:1px solid #d0d5dd;background:#fff;color:#101828;border-radius:10px;padding:8px 10px;font:700 12px Inter,system-ui,Arial;text-decoration:none}
+    .suite-page-tools a:hover,.suite-page-tools button:hover{background:#f8fafc}
+    .tour-backdrop{position:fixed;inset:0;background:rgba(16,24,40,.62);z-index:9999;display:none}
+    .tour-backdrop.show{display:block}
+    .tour-card{position:fixed;z-index:10050;width:min(390px,calc(100vw - 32px));background:#fff;border:1px solid #e4e7ec;border-radius:16px;box-shadow:0 18px 50px rgba(16,24,40,.24);padding:18px;display:none}
+    .tour-card.show{display:block}
+    .tour-card h3{margin:0 0 8px;font-size:18px;color:#101828}
+    .tour-card p{margin:0 0 16px;color:#475467;line-height:1.5;font-size:14px}
+    .tour-card .row{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}
+    .tour-card button{border:1px solid #d0d5dd;background:#fff;border-radius:10px;padding:9px 12px;font-weight:700}
+    .tour-card .primary{background:#d6232a;color:#fff;border-color:#d6232a}
+    .tour-highlight{position:relative!important;z-index:10010!important;outline:3px solid rgba(214,35,42,.55)!important;box-shadow:0 0 0 6px rgba(255,255,255,.92)!important;border-radius:12px!important}
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <script src="app.js"></script>
+  <div id="suiteTourBackdrop" class="tour-backdrop"></div>
+  <div id="suiteTourCard" class="tour-card"><h3 id="suiteTourTitle"></h3><p id="suiteTourText"></p><div class="row"><button id="suiteTourSkip" type="button">Close</button><button id="suiteTourNext" class="primary" type="button">Next</button></div></div>
+  <script>
+  (function(){
+    var TOUR_KEY='ged_tour_seen_v1';
+    var tourIndex=0;
+    var steps=[{"selector": ".login-card", "title": "Guest Experience CRM", "text": "This system is used to work customer cases. Sign in to generate a realistic queue for the shift."}, {"selector": "#signinBtn", "title": "Start a shift", "text": "Press Sign in to open the case queue. A fresh set of customer cases is created for this device."}, {"selector": ".sidebar", "title": "Views and filters", "text": "Use the left-hand views to filter cases by status or category."}, {"selector": ".list-panel", "title": "Case queue", "text": "Select a case from the queue to read the customer message."}, {"selector": ".thread-panel", "title": "Conversation thread", "text": "Read the customer message and any follow-up replies carefully before choosing a response."}, {"selector": ".action-panel", "title": "Case actions", "text": "Choose a prepared reply, check the draft, then send, resolve or escalate the case as appropriate."}];
+    function clearHighlights(){document.querySelectorAll('.tour-highlight').forEach(function(el){el.classList.remove('tour-highlight');});}
+    function closeTour(){clearHighlights();document.getElementById('suiteTourBackdrop').classList.remove('show');document.getElementById('suiteTourCard').classList.remove('show');localStorage.setItem(TOUR_KEY,'done');}
+    function showStep(){
+      clearHighlights();
+      if(tourIndex>=steps.length){closeTour();return;}
+      var step=steps[tourIndex];
+      var card=document.getElementById('suiteTourCard');
+      var backdrop=document.getElementById('suiteTourBackdrop');
+      backdrop.classList.add('show'); card.classList.add('show');
+      document.getElementById('suiteTourTitle').textContent=step.title;
+      document.getElementById('suiteTourText').textContent=step.text;
+      document.getElementById('suiteTourNext').textContent=tourIndex===steps.length-1?'Finish':'Next';
+      card.style.left='auto'; card.style.top='auto'; card.style.right='24px'; card.style.bottom='24px'; card.style.transform='none';
+      if(window.innerWidth<760){card.style.left='16px';card.style.right='16px';card.style.bottom='16px';}
+      var el=document.querySelector(step.selector);
+      if(el){el.classList.add('tour-highlight');el.scrollIntoView({block:'center',inline:'nearest',behavior:'smooth'});}
+    }
+    function startTour(){tourIndex=0;document.getElementById('suiteTourCard').style.transform='';showStep();}
+    document.addEventListener('click',function(event){ if(event.target && event.target.id==='suiteTourBtn'){ startTour(); } });
+    document.getElementById('suiteTourSkip').onclick=closeTour;
+    document.getElementById('suiteTourNext').onclick=function(){tourIndex+=1;showStep();};
+    document.getElementById('suiteTourBackdrop').onclick=closeTour;
+    setTimeout(function(){if(!localStorage.getItem(TOUR_KEY) && confirm('Would you like a quick tour of Guest Experience CRM?')) startTour(); else localStorage.setItem(TOUR_KEY,'done');},700);
+  })();
+  </script>
+</body>
+</html>
