@@ -27,9 +27,47 @@
 </head>
 <body>
   <div id="app"></div>
-  <script src="app.js"></script>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/12.2.1/firebase-app.js";
+    import {
+      getFirestore,
+      doc,
+      getDoc,
+      setDoc,
+      onSnapshot,
+      serverTimestamp
+    } from "https://www.gstatic.com/firebasejs/12.2.1/firebase-firestore.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyCRJqYsc2Vh6M-ehZJLi3LZfEDXXKJPYG4",
+      authDomain: "head-office-18227.firebaseapp.com",
+      projectId: "head-office-18227",
+      storageBucket: "head-office-18227.firebasestorage.app",
+      messagingSenderId: "303789449640",
+      appId: "1:303789449640:web:5279b9c31b059e920c7d9d"
+    };
+
+    const firebaseApp = initializeApp(firebaseConfig);
+    const db = getFirestore(firebaseApp);
+
+    window.HeadOfficeFirebase = {
+      db,
+      doc,
+      getDoc,
+      setDoc,
+      onSnapshot,
+      serverTimestamp
+    };
+
+    const script = document.createElement('script');
+    script.src = 'app.js';
+    document.body.appendChild(script);
+  </script>
+
   <div id="suiteTourBackdrop" class="tour-backdrop"></div>
   <div id="suiteTourCard" class="tour-card"><h3 id="suiteTourTitle"></h3><p id="suiteTourText"></p><div class="row"><button id="suiteTourSkip" type="button">Close</button><button id="suiteTourNext" class="primary" type="button">Next</button></div></div>
+
   <script>
   (function(){
     var TOUR_KEY='triage_tour_seen_v1';

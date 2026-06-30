@@ -1,6 +1,28 @@
-const STORAGE_HISTORY_KEY = 'nandos_ged_review_history_v1';
-const SESSION_KEY = 'nandos_ged_active_session_v1';
+const LEARNER_NAME_KEY = 'nandos_ged_learner_name_v1';
+const WORKLOAD_COLLECTION = 'guestExperienceCases';
 const app = document.getElementById('app');
+
+let firestoreReady = false;
+let db = null;
+let docRef = null;
+let getDocFn = null;
+let setDocFn = null;
+let onSnapshotFn = null;
+let serverTimestampFn = null;
+let workloadRef = null;
+let unsubscribeWorkload = null;
+let localEditUntil = 0;
+
+let sharedState = null;
+let uiState = {
+  username: localStorage.getItem(LEARNER_NAME_KEY) || '',
+  location: 'Leeds',
+  selectedCaseId: null,
+  selectedMacroId: null,
+  replyDraft: '',
+  filter: 'Inbox',
+  search: ''
+};
 
 const categoryMeta = {
   Complaints: { className: 'complaint', short: 'Complaint' },
@@ -270,25 +292,184 @@ function generateSession(username, location) {
   };
 }
 
-function loadHistory() {
-  try { return JSON.parse(localStorage.getItem(STORAGE_HISTORY_KEY) || '[]'); }
-  catch { return []; }
+function todayKey() {
+  return new Date().toISOString().slice(0, 10);
 }
-function saveHistoryEntry(session) {
-  const history = loadHistory();
-  const slim = createReviewSnapshot(session);
-  const existingIndex = history.findIndex((item) => item.id === slim.id);
-  if (existingIndex >= 0) history[existingIndex] = slim;
-  else history.unshift(slim);
-  localStorage.setItem(STORAGE_HISTORY_KEY, JSON.stringify(history.slice(0, 30)));
+
+function getFirebaseTools() {
+  const tools = window.HeadOfficeFirebase;
+  if (!tools || !tools.db || !tools.doc || !tools.getDoc || !tools.setDoc || !tools.onSnapshot || !tools.serverTimestamp) {
+    throw new Error('Firebase is not ready. Check guest-experience/index.html has loaded the Firebase setup before app.js.');
+  }
+  db = tools.db;
+  docRef = tools.doc;
+  getDocFn = tools.getDoc;
+  setDocFn = tools.setDoc;
+  onSnapshotFn = tools.onSnapshot;
+  serverTimestampFn = tools.serverTimestamp;
+  firestoreReady = true;
 }
+
+function makeFirestorePayload(session) {
+  return {
+    date: todayKey(),
+    id: session.id,
+    startedAt: session.startedAt,
+    cases: Array.isArray(session.cases) ? session.cases : [],
+    metrics: session.metrics || { actions: 0 },
+    updatedAt: serverTimestampFn()
+  };
+}
+
+function makeRenderSession() {
+  const base = sharedState || generateSession('shared.queue', 'Head Office');
+  return {
+    id: base.id,
+    username: uiState.username || 'guest.experience',
+    location: uiState.location || 'Leeds',
+    startedAt: base.startedAt,
+    cases: Array.isArray(base.cases) ? base.cases : [],
+    selectedCaseId: uiState.selectedCaseId,
+    selectedMacroId: uiState.selectedMacroId,
+    replyDraft: uiState.replyDraft || '',
+    filter: uiState.filter || 'Inbox',
+    search: uiState.search || '',
+    metrics: base.metrics || { actions: 0 }
+  };
+}
+
+function copyUiFromSession(session) {
+  uiState.username = session.username || uiState.username || 'guest.experience';
+  uiState.location = session.location || uiState.location || 'Leeds';
+  uiState.selectedCaseId = session.selectedCaseId || null;
+  uiState.selectedMacroId = session.selectedMacroId || null;
+  uiState.replyDraft = session.replyDraft || '';
+  uiState.filter = session.filter || 'Inbox';
+  uiState.search = session.search || '';
+  if (uiState.username) localStorage.setItem(LEARNER_NAME_KEY, uiState.username);
+}
+
+async function saveSharedSession(session) {
+  if (!firestoreReady || !workloadRef) return;
+  localEditUntil = Date.now() + 1200;
+  sharedState = {
+    id: session.id,
+    startedAt: session.startedAt,
+    cases: session.cases,
+    metrics: session.metrics || { actions: 0 }
+  };
+  try {
+    await setDocFn(workloadRef, makeFirestorePayload(session), { merge: true });
+  } catch (err) {
+    console.error(err);
+    alert('Could not save online. Check internet connection or Firebase rules.');
+  }
+}
+
 function saveActiveSession(session) {
-  sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
-  saveHistoryEntry(session);
+  copyUiFromSession(session);
+  saveSharedSession(session);
 }
+
+async function initialiseSharedWorkload(username, location) {
+  try {
+    getFirebaseTools();
+    uiState.username = username || uiState.username || 'guest.experience';
+    uiState.location = location || uiState.location || 'Leeds';
+    if (uiState.username) localStorage.setItem(LEARNER_NAME_KEY, uiState.username);
+
+    app.innerHTML = `
+      <div class="login-shell">
+        <div class="login-card">
+          <div class="brand">
+            <div class="brand-mark">N</div>
+            <div class="brand-copy">
+              <h1>Nando's Guest Experience Desk</h1>
+              <p>Connecting to shared inbox...</p>
+            </div>
+          </div>
+          <div class="small-note">Loading today’s live Guest Experience workload.</div>
+        </div>
+      </div>
+    `;
+
+    workloadRef = docRef(db, WORKLOAD_COLLECTION, todayKey());
+    const snap = await getDocFn(workloadRef);
+
+    if (!snap.exists()) {
+      const fresh = generateSession('shared.queue', 'Head Office');
+      await setDocFn(workloadRef, {
+        date: todayKey(),
+        id: fresh.id,
+        startedAt: fresh.startedAt,
+        cases: fresh.cases,
+        metrics: fresh.metrics || { actions: 0 },
+        createdAt: serverTimestampFn(),
+        updatedAt: serverTimestampFn()
+      });
+    }
+
+    if (unsubscribeWorkload) unsubscribeWorkload();
+    unsubscribeWorkload = onSnapshotFn(workloadRef, (snapshot) => {
+      if (!snapshot.exists()) return;
+      const data = snapshot.data() || {};
+      sharedState = {
+        id: data.id || uid('session'),
+        startedAt: data.startedAt || new Date().toISOString(),
+        cases: Array.isArray(data.cases) ? data.cases : [],
+        metrics: data.metrics || { actions: 0 }
+      };
+
+      const renderSession = makeRenderSession();
+      const filtered = getFilteredCases(renderSession);
+      if (!renderSession.cases.some((item) => item.id === uiState.selectedCaseId)) {
+        uiState.selectedCaseId = filtered[0]?.id || renderSession.cases[0]?.id || null;
+      }
+
+      if (Date.now() < localEditUntil) return;
+      renderWorkspace(makeRenderSession());
+    }, (error) => {
+      console.error(error);
+      app.innerHTML = `
+        <div class="login-shell">
+          <div class="login-card">
+            <div class="brand">
+              <div class="brand-mark">N</div>
+              <div class="brand-copy">
+                <h1>Guest Experience could not connect</h1>
+                <p>${escapeHtml(error.message)}</p>
+              </div>
+            </div>
+            <button class="btn btn-primary" onclick="location.reload()">Try again</button>
+          </div>
+        </div>
+      `;
+    });
+  } catch (err) {
+    console.error(err);
+    app.innerHTML = `
+      <div class="login-shell">
+        <div class="login-card">
+          <div class="brand">
+            <div class="brand-mark">N</div>
+            <div class="brand-copy">
+              <h1>Guest Experience could not load</h1>
+              <p>${escapeHtml(err.message)}</p>
+            </div>
+          </div>
+          <button class="btn btn-primary" onclick="location.reload()">Try again</button>
+        </div>
+      </div>
+    `;
+  }
+}
+
 function loadActiveSession() {
-  try { return JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null'); }
-  catch { return null; }
+  return sharedState ? makeRenderSession() : null;
+}
+
+function loadHistory() {
+  return sharedState ? [createReviewSnapshot(makeRenderSession())] : [];
 }
 
 function getFilteredCases(session) {
@@ -376,7 +557,7 @@ function renderLogin() {
         </div>
         <div class="form-row">
           <label for="username">Username</label>
-          <input id="username" class="input" placeholder="Enter username" />
+          <input id="username" class="input" placeholder="Enter username" value="${escapeHtml(uiState.username || '')}" />
         </div>
         <div class="form-row">
           <label for="location">Site</label>
@@ -389,7 +570,7 @@ function renderLogin() {
             <option>York</option>
           </select>
         </div>
-        <div class="small-note">Shift started on sign-in. A new queue is generated for each session.</div>
+        <div class="small-note">Sign in to open today’s shared live inbox. Everyone sees the same cases.</div>
         <div class="button-row">
           <button id="signinBtn" class="btn btn-primary">Sign in</button>
           <button id="reviewBtn" class="btn btn-ghost">Review Console</button>
@@ -401,9 +582,7 @@ function renderLogin() {
   document.getElementById('signinBtn').onclick = () => {
     const username = document.getElementById('username').value.trim() || 'guest.experience';
     const location = document.getElementById('location').value;
-    const session = generateSession(username, location);
-    saveActiveSession(session);
-    renderWorkspace(session);
+    initialiseSharedWorkload(username, location);
   };
   document.getElementById('reviewBtn').onclick = renderReviewConsole;
 }
@@ -513,7 +692,7 @@ function caseRow(item, selectedCaseId) {
         <span class="tag ${meta.className}">${escapeHtml(meta.short)}</span>
         <div style="display:flex; gap:6px; align-items:center;">
           <span class="status-pill ${item.status.toLowerCase()}">${escapeHtml(item.status)}</span>
-          <span class="subtle">${formatTime(item.messages[item.messages.length - 1].at)}</span>
+          <span class="subtle">${item.completedBy ? 'Completed by ' + escapeHtml(item.completedBy) + ' · ' + formatTime(item.completedTime || item.completedAt || item.closedAt) : formatTime(item.messages[item.messages.length - 1].at)}</span>
         </div>
       </div>
     </button>
@@ -607,7 +786,15 @@ function actionPanel(selected, selectedMacroId, draft) {
 
 function wireWorkspaceEvents(session) {
   document.getElementById('signOut').onclick = () => {
-    sessionStorage.removeItem(SESSION_KEY);
+    uiState.selectedCaseId = null;
+    uiState.selectedMacroId = null;
+    uiState.replyDraft = '';
+    uiState.filter = 'Inbox';
+    uiState.search = '';
+    if (unsubscribeWorkload) {
+      unsubscribeWorkload();
+      unsubscribeWorkload = null;
+    }
     renderLogin();
   };
   document.getElementById('returnReview').onclick = renderReviewConsole;
@@ -688,6 +875,7 @@ function wireWorkspaceEvents(session) {
   document.getElementById('resolveBtn').onclick = () => {
     selected.status = 'Resolved';
     selected.closedAt = new Date().toISOString();
+    markCompletedMetadata(selected, session);
     addSystemMessage(selected, 'Case marked as Resolved.');
     scoreCase(selected, session.selectedMacroId, 'Resolved');
     saveActiveSession(session);
@@ -696,6 +884,7 @@ function wireWorkspaceEvents(session) {
   document.getElementById('escalateBtn').onclick = () => {
     selected.status = 'Escalated';
     selected.closedAt = new Date().toISOString();
+    markCompletedMetadata(selected, session);
     addSystemMessage(selected, 'Case escalated for further review.');
     scoreCase(selected, session.selectedMacroId || 'regional_escalation', 'Escalated');
     saveActiveSession(session);
@@ -708,6 +897,14 @@ function wireWorkspaceEvents(session) {
     saveActiveSession(session);
     renderWorkspace(session);
   };
+}
+
+function markCompletedMetadata(caseItem, session) {
+  const now = new Date().toISOString();
+  caseItem.completed = true;
+  caseItem.completedBy = session.username || 'Unknown';
+  caseItem.completedTime = now;
+  caseItem.completedAt = now;
 }
 
 function addSystemMessage(caseItem, text) {
@@ -775,18 +972,21 @@ function sendReply(session, caseItem, replyText) {
   if (!caseItem.followUpSent && ['refund_approved','missing_item_resolution','delivery_delay_apology','positive_feedback_reply','allergy_policy'].includes(macroId)) {
     caseItem.status = 'Resolved';
     caseItem.closedAt = now;
+    markCompletedMetadata(caseItem, session);
     addSystemMessage(caseItem, 'Case marked as Resolved following reply.');
   }
 
   if (macroId === 'regional_escalation' || macroId === 'restaurant_escalation') {
     caseItem.status = 'Escalated';
     caseItem.closedAt = now;
+    markCompletedMetadata(caseItem, session);
     addSystemMessage(caseItem, 'Case escalated for further review.');
   }
 
   if (caseItem.followUpSent && caseItem.expectedFollowUp.includes(macroId)) {
     caseItem.status = 'Resolved';
     caseItem.closedAt = now;
+    markCompletedMetadata(caseItem, session);
     addSystemMessage(caseItem, 'Follow-up completed and case resolved.');
   }
 
@@ -850,8 +1050,7 @@ function renderReviewConsole() {
   `;
   document.getElementById('backToApp').onclick = renderLogin;
   document.getElementById('clearHistory').onclick = () => {
-    localStorage.removeItem(STORAGE_HISTORY_KEY);
-    renderReviewConsole();
+    alert('Review history is now live and shared through Firestore. This button no longer clears local device history.');
   };
 }
 
@@ -909,7 +1108,5 @@ function summaryCard(value, label) {
 }
 
 (function boot() {
-  const active = loadActiveSession();
-  if (active) renderWorkspace(active);
-  else renderLogin();
+  renderLogin();
 })();

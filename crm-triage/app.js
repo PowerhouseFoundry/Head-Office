@@ -250,28 +250,157 @@ function generateSession(username, site) {
   };
 }
 
-function loadActive() {
-  try { return JSON.parse(sessionStorage.getItem(ACTIVE_KEY) || 'null'); } catch { return null; }
+
+const NAME_KEY = 'crm_triage_learner_name_v1';
+const SITE_KEY = 'crm_triage_site_v1';
+const WORKLOAD_COLLECTION = 'crmSortingCases';
+
+let learnerName = localStorage.getItem(NAME_KEY) || '';
+let learnerSite = localStorage.getItem(SITE_KEY) || 'Leeds Head Office';
+let unsubscribeWorkload = null;
+let workloadRef = null;
+let localEditUntil = 0;
+let state = {
+  id: '',
+  day: todayKey(),
+  username: learnerName,
+  site: learnerSite,
+  startedAt: new Date().toISOString(),
+  emails: [],
+  selectedEmailId: null,
+  filter: 'Inbox',
+  showHints: false,
+  reviewMode: false
+};
+
+function todayKey() {
+  return new Date().toISOString().slice(0, 10);
 }
-function saveActive(session) {
-  sessionStorage.setItem(ACTIVE_KEY, JSON.stringify(session));
-  saveHistory(session);
+
+function getFirebaseTools() {
+  const tools = window.HeadOfficeFirebase;
+  if (!tools || !tools.db || !tools.doc || !tools.getDoc || !tools.setDoc || !tools.onSnapshot || !tools.serverTimestamp) {
+    throw new Error('Firebase is not ready. Check crm-triage/index.html has loaded the Firebase setup before app.js.');
+  }
+  return tools;
 }
-function loadHistory() {
-  try { return JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]'); } catch { return []; }
+
+function sharedWorkloadRef() {
+  const tools = getFirebaseTools();
+  if (!workloadRef) workloadRef = tools.doc(tools.db, WORKLOAD_COLLECTION, todayKey());
+  return workloadRef;
 }
-function saveHistory(session) {
-  const history = loadHistory();
-  const snap = makeSnapshot(session);
-  const index = history.findIndex(item => item.id === snap.id);
-  if (index >= 0) history[index] = snap;
-  else history.unshift(snap);
-  localStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, 40)));
+
+function makeSharedPayload(session) {
+  const tools = getFirebaseTools();
+  return {
+    day: todayKey(),
+    emails: Array.isArray(session.emails) ? session.emails : [],
+    updatedAt: tools.serverTimestamp()
+  };
 }
+
+function applySharedEmails(emails) {
+  state.emails = Array.isArray(emails) ? emails : [];
+  if (!state.emails.some(e => e.id === state.selectedEmailId)) {
+    state.selectedEmailId = state.emails[0]?.id || null;
+  }
+}
+
+async function initialiseSharedInbox(username, site, options = {}) {
+  learnerName = username || learnerName || 'guest.agent01';
+  learnerSite = site || learnerSite || 'Leeds Head Office';
+  localStorage.setItem(NAME_KEY, learnerName);
+  localStorage.setItem(SITE_KEY, learnerSite);
+
+  state.username = learnerName;
+  state.site = learnerSite;
+  state.day = todayKey();
+  state.filter = state.filter || 'Inbox';
+  state.showHints = !!state.showHints;
+
+  try {
+    app.innerHTML = `
+      <main class="login-shell">
+        <section class="login-card hero-card">
+          <div class="brand">
+            <div class="brand-mark">N</div>
+            <div class="brand-copy">
+              <h1>Nando's Inbox Triage Desk</h1>
+              <p>Connecting to shared inbox...</p>
+            </div>
+          </div>
+          <div class="small-note">Loading today's shared CRM sorting workload.</div>
+        </section>
+      </main>`;
+
+    const tools = getFirebaseTools();
+    const ref = sharedWorkloadRef();
+    const snap = await tools.getDoc(ref);
+
+    if (!snap.exists() || options.forceNew) {
+      const fresh = generateSession(learnerName, learnerSite);
+      state.id = fresh.id;
+      state.startedAt = fresh.startedAt;
+      state.emails = fresh.emails;
+      state.selectedEmailId = fresh.selectedEmailId;
+      await tools.setDoc(ref, {
+        day: todayKey(),
+        emails: fresh.emails,
+        createdAt: tools.serverTimestamp(),
+        updatedAt: tools.serverTimestamp()
+      }, { merge: true });
+    }
+
+    if (unsubscribeWorkload) unsubscribeWorkload();
+    unsubscribeWorkload = tools.onSnapshot(ref, (snapshot) => {
+      if (!snapshot.exists()) return;
+      const data = snapshot.data() || {};
+      const previousFilter = state.filter || 'Inbox';
+      const previousSelected = state.selectedEmailId;
+      const previousHints = !!state.showHints;
+      state = {
+        ...state,
+        id: data.id || state.id || `crm_${todayKey()}`,
+        day: data.day || todayKey(),
+        username: learnerName,
+        site: learnerSite,
+        startedAt: data.createdAt?.toDate ? data.createdAt.toDate().toISOString() : (state.startedAt || new Date().toISOString()),
+        emails: Array.isArray(data.emails) ? data.emails : [],
+        selectedEmailId: previousSelected,
+        filter: previousFilter,
+        showHints: previousHints,
+        reviewMode: false
+      };
+      if (!state.emails.some(e => e.id === state.selectedEmailId)) {
+        state.selectedEmailId = state.emails[0]?.id || null;
+      }
+      if (Date.now() < localEditUntil) return;
+      renderWorkspace(state, captureScrollState());
+    }, (error) => {
+      console.error(error);
+      app.innerHTML = `<main style="padding:24px;font-family:Inter,Arial"><h1>CRM Sorting Desk could not connect</h1><p>${escapeHtml(error.message)}</p></main>`;
+    });
+  } catch (error) {
+    console.error(error);
+    app.innerHTML = `<main style="padding:24px;font-family:Inter,Arial"><h1>CRM Sorting Desk could not load</h1><p>${escapeHtml(error.message)}</p></main>`;
+  }
+}
+
+async function saveActive(session) {
+  localEditUntil = Date.now() + 900;
+  try {
+    const tools = getFirebaseTools();
+    await tools.setDoc(sharedWorkloadRef(), makeSharedPayload(session), { merge: true });
+  } catch (error) {
+    console.error(error);
+  }
+}
+
 function makeSnapshot(session) {
   const m = metrics(session);
   return {
-    id: session.id,
+    id: `crm_${todayKey()}`,
     username: session.username,
     site: session.site,
     startedAt: session.startedAt,
@@ -285,7 +414,9 @@ function makeSnapshot(session) {
       selectedPriority: e.submittedPriority || e.selectedPriority || 'Not set',
       status: e.status,
       attempts: e.attempts,
-      result: e.result
+      result: e.result,
+      sortedBy: e.sortedBy || '',
+      sortedAt: e.sortedAt || ''
     }))
   };
 }
@@ -310,7 +441,7 @@ function filteredEmails(session) {
     if (session.filter === 'Unsorted') return email.status === 'Unsorted';
     if (session.filter === 'Sorted') return email.status !== 'Unsorted';
     if (session.filter === 'Needs Review') return email.result === 'Review';
-    return email.selectedCategory === session.filter;
+    return email.selectedCategory === session.filter || email.submittedCategory === session.filter;
   });
 }
 function countFor(session, filter) {
@@ -318,7 +449,7 @@ function countFor(session, filter) {
   if (filter === 'Unsorted') return session.emails.filter(e => e.status === 'Unsorted').length;
   if (filter === 'Sorted') return session.emails.filter(e => e.status !== 'Unsorted').length;
   if (filter === 'Needs Review') return session.emails.filter(e => e.result === 'Review').length;
-  return session.emails.filter(e => e.selectedCategory === filter).length;
+  return session.emails.filter(e => e.selectedCategory === filter || e.submittedCategory === filter).length;
 }
 
 function renderLogin() {
@@ -334,25 +465,21 @@ function renderLogin() {
         </div>
         <div class="hero-panel">
           <strong>Student task</strong>
-          <p>Read each raw email and sort it into the correct CRM category. A new inbox is generated every sign-in.</p>
+          <p>Read each raw email and sort it into the correct CRM category. Everyone works from the same shared inbox.</p>
         </div>
         <div class="form-row">
           <label for="username">Username</label>
-          <input id="username" class="input" placeholder="e.g. guest.agent01" autocomplete="off" />
+          <input id="username" class="input" placeholder="e.g. James" autocomplete="off" value="${escapeHtml(learnerName)}" />
         </div>
         <div class="form-row">
           <label for="site">Training site</label>
           <select id="site" class="select">
-            <option>Leeds Head Office</option>
-            <option>Manchester Head Office</option>
-            <option>Birmingham Head Office</option>
-            <option>Liverpool Head Office</option>
-            <option>York Head Office</option>
+            ${['Leeds Head Office','Manchester Head Office','Birmingham Head Office','Liverpool Head Office','York Head Office'].map(s => `<option ${s === learnerSite ? 'selected' : ''}>${s}</option>`).join('')}
           </select>
         </div>
         <div class="small-note">This is a training simulation. No real customer data is used.</div>
         <div class="button-row">
-          <button id="startBtn" class="btn btn-primary">Start new inbox</button>
+          <button id="startBtn" class="btn btn-primary">Open shared inbox</button>
           <button id="reviewBtn" class="btn btn-ghost">Manager review</button>
         </div>
       </section>
@@ -361,11 +488,17 @@ function renderLogin() {
   document.getElementById('startBtn').onclick = () => {
     const username = document.getElementById('username').value.trim() || 'guest.agent01';
     const site = document.getElementById('site').value;
-    const session = generateSession(username, site);
-    saveActive(session);
-    renderWorkspace(session);
+    initialiseSharedInbox(username, site);
   };
-  document.getElementById('reviewBtn').onclick = renderReview;
+  document.getElementById('reviewBtn').onclick = () => {
+    const username = document.getElementById('username')?.value.trim() || learnerName || 'guest.agent01';
+    const site = document.getElementById('site')?.value || learnerSite;
+    learnerName = username;
+    learnerSite = site;
+    localStorage.setItem(NAME_KEY, learnerName);
+    localStorage.setItem(SITE_KEY, learnerSite);
+    initialiseSharedInbox(username, site).then(() => renderReview());
+  };
 }
 
 function renderWorkspace(session, scrollState = null) {
@@ -392,7 +525,7 @@ function renderWorkspace(session, scrollState = null) {
         </div>
         <div class="topbar-right">
           <button id="hintBtn" class="btn btn-small ${session.showHints ? 'btn-active' : ''}">${session.showHints ? 'Hints on' : 'Hints off'}</button>
-          <button id="newInboxBtn" class="btn btn-small">New inbox</button>
+          <button id="newInboxBtn" class="btn btn-small">New shared inbox</button>
           <button id="reviewBtn" class="btn btn-small">Manager review</button>
           <span class="suite-page-tools"><a href="../index.html">Return to home</a><button id="suiteTourBtn" type="button">Tour</button></span>
           <button id="signOutBtn" class="btn btn-small">Sign out</button>
@@ -441,6 +574,7 @@ function emailRow(email, selectedId) {
       : '<span class="status-pill open">Unsorted</span>';
   const categoryLabel = displayCategory || 'Not sorted';
   const priorityLabel = displayPriority || 'No priority';
+  const sortedLine = email.sortedBy && email.sortedAt ? `Sorted by ${escapeHtml(email.sortedBy)} · ${formatTime(email.sortedAt)}` : formatTime(email.receivedAt);
   return `
     <button class="case-row email-row ${email.id === selectedId ? 'active' : ''}" data-email="${email.id}">
       <div class="row-top">
@@ -448,18 +582,19 @@ function emailRow(email, selectedId) {
           <div class="row-title">${escapeHtml(email.customerName)}</div>
           <div class="row-subject">${escapeHtml(email.subject)}</div>
         </div>
-        <span class="priority-pill ${email.selectedPriority ? email.selectedPriority.toLowerCase() : 'normal'}">${escapeHtml(priorityLabel)}</span>
+        <span class="priority-pill ${displayPriority ? displayPriority.toLowerCase() : 'normal'}">${escapeHtml(priorityLabel)}</span>
       </div>
       <div class="preview">${escapeHtml(email.body.split('\n').filter(Boolean)[1] || email.body).slice(0, 128)}...</div>
       <div class="row-meta" style="margin-top:10px;">
         <span class="tag ${meta ? meta.className : ''}">${escapeHtml(categoryLabel)}</span>
-        <span class="subtle">${formatTime(email.receivedAt)}</span>
+        <span class="subtle">${sortedLine}</span>
         ${resultBadge}
       </div>
     </button>`;
 }
 function emailView(email, showHints) {
   const result = email.result ? resultBox(email) : '';
+  const sortedNotice = email.sortedBy && email.sortedAt ? `<div class="hint-strip"><strong>Shared update:</strong> Sorted by ${escapeHtml(email.sortedBy)} at ${formatTime(email.sortedAt)}.</div>` : '';
   const hints = showHints ? `<div class="hint-strip"><strong>Hint:</strong> Look for the main reason the customer emailed. Do not be distracted by extra details like order number or restaurant name.</div>` : '';
   return `
     <div class="email-head">
@@ -473,6 +608,7 @@ function emailView(email, showHints) {
     </div>
     <div class="email-body-wrap">
       ${hints}
+      ${sortedNotice}
       ${result}
       <article class="raw-email-card">
         <div class="raw-email-meta">
@@ -518,6 +654,7 @@ function triagePanel(email) {
         <div class="decision-card">
           <div><span>Category</span><strong>${escapeHtml(email.selectedCategory || 'Not chosen')}</strong></div>
           <div><span>Priority</span><strong>${escapeHtml(email.selectedPriority || 'Not chosen')}</strong></div>
+          ${email.sortedBy ? `<div><span>Completed by</span><strong>${escapeHtml(email.sortedBy)} · ${formatTime(email.sortedAt)}</strong></div>` : ''}
         </div>
       </div>
     </div>
@@ -534,31 +671,41 @@ function priorityHelp(priority) {
 }
 
 function wireWorkspace(session) {
-  document.getElementById('signOutBtn').onclick = () => { sessionStorage.removeItem(ACTIVE_KEY); renderLogin(); };
+  document.getElementById('signOutBtn').onclick = () => {
+    if (unsubscribeWorkload) unsubscribeWorkload();
+    unsubscribeWorkload = null;
+    renderLogin();
+  };
   document.getElementById('reviewBtn').onclick = renderReview;
-  document.getElementById('newInboxBtn').onclick = () => {
+  document.getElementById('newInboxBtn').onclick = async () => {
+    if (!confirm('Generate a new shared CRM Sorting inbox for today? This will replace the inbox for everyone.')) return;
     const fresh = generateSession(session.username, session.site);
-    saveActive(fresh);
-    renderWorkspace(fresh);
+    state.emails = fresh.emails;
+    state.selectedEmailId = fresh.selectedEmailId;
+    state.startedAt = fresh.startedAt;
+    state.id = fresh.id;
+    await saveActive(state);
+    renderWorkspace(state);
   };
   document.getElementById('hintBtn').onclick = () => {
     session.showHints = !session.showHints;
-    saveActive(session);
+    state.showHints = session.showHints;
     rerenderWorkspacePreservingScroll(session);
   };
   document.querySelectorAll('[data-filter]').forEach(btn => {
     btn.onclick = () => {
       session.filter = btn.dataset.filter;
+      state.filter = session.filter;
       const list = filteredEmails(session);
       if (!list.some(e => e.id === session.selectedEmailId)) session.selectedEmailId = list[0]?.id || null;
-      saveActive(session);
+      state.selectedEmailId = session.selectedEmailId;
       rerenderWorkspacePreservingScroll(session);
     };
   });
   document.querySelectorAll('[data-email]').forEach(btn => {
     btn.onclick = () => {
       session.selectedEmailId = btn.dataset.email;
-      saveActive(session);
+      state.selectedEmailId = session.selectedEmailId;
       rerenderWorkspacePreservingScroll(session);
     };
   });
@@ -566,38 +713,42 @@ function wireWorkspace(session) {
   const email = visibleEmails.find(e => e.id === session.selectedEmailId) || null;
   if (!email) return;
   document.querySelectorAll('[data-category]').forEach(btn => {
-    btn.onclick = () => {
+    btn.onclick = async () => {
       email.selectedCategory = btn.dataset.category;
-      saveActive(session);
+      await saveActive(session);
       rerenderWorkspacePreservingScroll(session);
     };
   });
   document.querySelectorAll('[data-priority]').forEach(btn => {
-    btn.onclick = () => {
+    btn.onclick = async () => {
       email.selectedPriority = btn.dataset.priority;
-      saveActive(session);
+      await saveActive(session);
       rerenderWorkspacePreservingScroll(session);
     };
   });
-  document.getElementById('clearChoiceBtn').onclick = () => {
+  document.getElementById('clearChoiceBtn').onclick = async () => {
     email.selectedCategory = '';
     email.selectedPriority = '';
     email.submittedCategory = '';
     email.submittedPriority = '';
     email.status = 'Unsorted';
     email.result = null;
-    saveActive(session);
+    email.sortedBy = '';
+    email.sortedAt = '';
+    await saveActive(session);
     rerenderWorkspacePreservingScroll(session);
   };
   document.getElementById('skipBtn').onclick = () => moveNext(session);
-  document.getElementById('submitTriageBtn').onclick = () => {
+  document.getElementById('submitTriageBtn').onclick = async () => {
     if (!email.selectedCategory || !email.selectedPriority) return;
     email.attempts += 1;
     email.submittedCategory = email.selectedCategory;
     email.submittedPriority = email.selectedPriority;
     email.status = 'Sorted';
     email.result = (email.submittedCategory === email.expectedCategory && email.submittedPriority === email.expectedPriority) ? 'Correct' : 'Review';
-    saveActive(session);
+    email.sortedBy = learnerName || session.username || 'Unknown';
+    email.sortedAt = new Date().toISOString();
+    await saveActive(session);
     moveNext(session, true);
   };
 }
@@ -608,12 +759,12 @@ function moveNext(session, preferUnsorted = false) {
   const nextUnsorted = session.emails.find((e, index) => preferUnsorted && index > currentIndex && e.status === 'Unsorted') || session.emails.find(e => preferUnsorted && e.status === 'Unsorted');
   const next = nextUnsorted || session.emails[currentIndex + 1] || session.emails[0] || null;
   session.selectedEmailId = next ? next.id : null;
-  saveActive(session);
+  state.selectedEmailId = session.selectedEmailId;
   renderWorkspace(session, scrollState);
 }
 
 function renderReview() {
-  const history = loadHistory();
+  const item = makeSnapshot(state);
   app.innerHTML = `
     <main class="review-shell">
       <section class="review-card">
@@ -622,19 +773,19 @@ function renderReview() {
             <div class="brand-mark">N</div>
             <div class="brand-copy">
               <h2>Manager Review</h2>
-              <p>Inbox triage performance</p>
+              <p>Live inbox triage performance</p>
             </div>
           </div>
           <div style="display:flex; gap:10px; flex-wrap:wrap;">
+            <button id="backWorkspaceBtn" class="btn">Return to inbox</button>
             <button id="backSignInBtn" class="btn">Return to sign-in</button>
-            <button id="clearHistoryBtn" class="btn btn-danger">Clear history</button>
           </div>
         </div>
-        ${history.length ? history.map(reviewBlock).join('') : '<div class="empty-note" style="margin-top:20px;">No completed or active sessions yet.</div>'}
+        ${state.emails.length ? reviewBlock(item) : '<div class="empty-note" style="margin-top:20px;">No shared inbox is loaded yet.</div>'}
       </section>
     </main>`;
+  document.getElementById('backWorkspaceBtn').onclick = (event) => { event.preventDefault(); renderWorkspace(state); };
   document.getElementById('backSignInBtn').onclick = (event) => { event.preventDefault(); renderLogin(); };
-  document.getElementById('clearHistoryBtn').onclick = (event) => { event.preventDefault(); localStorage.removeItem(HISTORY_KEY); renderReview(); };
 }
 function reviewBlock(item) {
   return `
@@ -642,7 +793,7 @@ function reviewBlock(item) {
       <div class="toolbar-row">
         <div>
           <div class="panel-title">${escapeHtml(item.username)} · ${escapeHtml(item.site)}</div>
-          <div class="subtle">Started ${formatDate(item.startedAt)}</div>
+          <div class="subtle">Shared workload ${escapeHtml(todayKey())}</div>
         </div>
         <div class="summary-grid mini-summary">
           ${summaryCard(item.metrics.sorted, 'Sorted')}
@@ -652,7 +803,7 @@ function reviewBlock(item) {
         </div>
       </div>
       <table class="review-table">
-        <thead><tr><th>Customer</th><th>Subject</th><th>Student category</th><th>Correct category</th><th>Student priority</th><th>Correct priority</th><th>Result</th></tr></thead>
+        <thead><tr><th>Customer</th><th>Subject</th><th>Student category</th><th>Correct category</th><th>Student priority</th><th>Correct priority</th><th>Completed by</th><th>Result</th></tr></thead>
         <tbody>
           ${item.emails.map(e => `<tr>
             <td>${escapeHtml(e.from)}</td>
@@ -661,6 +812,7 @@ function reviewBlock(item) {
             <td>${escapeHtml(e.expectedCategory)}</td>
             <td>${escapeHtml(e.selectedPriority)}</td>
             <td>${escapeHtml(e.expectedPriority)}</td>
+            <td>${e.sortedBy ? `${escapeHtml(e.sortedBy)}<br><span class="subtle">${formatTime(e.sortedAt)}</span>` : '—'}</td>
             <td class="${e.result === 'Correct' ? 'quality-good' : e.result === 'Review' ? 'quality-review' : 'quality-poor'}">${escapeHtml(e.result || 'Not sorted')}</td>
           </tr>`).join('')}
         </tbody>
@@ -672,7 +824,5 @@ function summaryCard(value, label) {
 }
 
 (function boot() {
-  const active = loadActive();
-  if (active) renderWorkspace(active);
-  else renderLogin();
+  renderLogin();
 })();
